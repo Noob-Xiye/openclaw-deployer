@@ -1,6 +1,6 @@
 [package]
 name = "openclaw-deployer"
-version = "0.1.0"
+version = "0.2.0"
 description = "OpenClaw Config Manager — Tauri2 desktop app for managing OpenClaw configuration"
 authors = ["you"]
 edition = "2021"

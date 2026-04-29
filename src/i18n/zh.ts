@@ -45,7 +45,7 @@ export const zh = {
     chat: '智能体对话',
     instances: '实例管理',
     security: '安全分析',
-    install: '安装向导',
+    install: '部署中心',
     store: '部署中心',
   },
   connection: {

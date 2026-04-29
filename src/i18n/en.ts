@@ -45,7 +45,7 @@ export const en = {
     chat: 'Chat',
     instances: 'Instances',
     security: 'Security',
-    install: 'Install',
+    install: 'Deploy Center',
     store: 'Deploy',
   },
   connection: {
