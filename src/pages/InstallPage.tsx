@@ -457,12 +457,17 @@ export function InstallPage() {
   // Start Gateway for a variant
   const handleStartGateway = async (variant: ClawVariant) => {
     try {
+      // For QClaw bundled variant, use openclaw variant ID
+      const variantId = variant.id === 'qclaw' ? 'openclaw' : variant.id;
       const result = await invoke<{ success: boolean; message: string; pid: number | null }>(
         'start_variant_gateway',
-        { variantId: variant.id, port: 3000 }
+        { variantId, port: 18789 }
       );
       addToast({ type: result.success ? 'success' : 'error', message: result.message });
       if (result.success) {
+        // Reload config and trigger gateway WS connection
+        const { loadConfig } = useAppStore.getState();
+        await loadConfig();
         setActiveSection('dashboard');
       }
     } catch (e) {

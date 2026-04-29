@@ -17,11 +17,12 @@ import { SessionsPage } from './pages/SessionsPage';
 import { InstancesPage } from './pages/InstancesPage';
 import { SecurityPage } from './pages/SecurityPage';
 import { InstallPage } from './pages/InstallPage';
+import { gatewayClient } from './services/gatewayWs';
 
 import './index.css';
 
 function App() {
-  const { activeSection, theme, initPaths, loadConfig } = useAppStore();
+  const { activeSection, theme, config, initPaths, loadConfig } = useAppStore();
 
   // Apply theme class to <html>
   useEffect(() => {
@@ -42,7 +43,7 @@ function App() {
     }
   }, [theme]);
 
-  // Boot: detect openclaw home → read config
+  // Boot: detect openclaw home → read config → connect Gateway WS
   useEffect(() => {
     const boot = async () => {
       await initPaths();
@@ -50,6 +51,19 @@ function App() {
     };
     boot();
   }, []);
+
+  // When config loads/changes, feed port+token to gatewayClient
+  useEffect(() => {
+    if (config?.gateway) {
+      const port = config.gateway.port || 18789;
+      const token = config.gateway.auth?.token || '';
+      gatewayClient.setConfig({ port, token });
+      // Auto-connect if not already connected
+      if (gatewayClient.state === 'disconnected') {
+        gatewayClient.ensureConnected().catch(() => {});
+      }
+    }
+  }, [config?.gateway?.port, config?.gateway?.auth?.token]);
 
   const renderPage = () => {
     switch (activeSection) {

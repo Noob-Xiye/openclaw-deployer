@@ -224,9 +224,36 @@ fn home_dir() -> Option<PathBuf> {
     }
 }
 
-/// Get OpenClaw home directory - prefer install directory over user home
+/// Get OpenClaw home directory - prefer QClaw install, then exe dir, then user home
 fn openclaw_home() -> String {
-    // First, try to use the executable's directory (for portable installs)
+    // 1. Check QClaw bundled OpenClaw installation
+    #[cfg(target_os = "windows")]
+    {
+        let qclaw_paths = [
+            r"D:\Program Files\QClaw\resources\openclaw",
+            r"C:\Program Files\QClaw\resources\openclaw",
+        ];
+        for p in &qclaw_paths {
+            if PathBuf::from(p).join("openclaw.cmd").exists() {
+                return p.to_string();
+            }
+        }
+        // Also check via environment variable or registry-like detection
+        if let Ok(program_files) = std::env::var("ProgramFiles") {
+            let qclaw = format!("{}\\QClaw\\resources\\openclaw", program_files);
+            if PathBuf::from(&qclaw).join("openclaw.cmd").exists() {
+                return qclaw;
+            }
+        }
+        if let Ok(d_drive) = std::env::var("SystemDrive") {
+            let qclaw = format!("{}\\Program Files\\QClaw\\resources\\openclaw", d_drive);
+            if PathBuf::from(&qclaw).join("openclaw.cmd").exists() {
+                return qclaw;
+            }
+        }
+    }
+
+    // 2. Try executable's directory (for portable installs)
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
             // Check if we're in a development environment
@@ -238,12 +265,14 @@ fn openclaw_home() -> String {
                 // Use the executable's parent directory as the install directory
                 let install_dir = exe_dir.parent().unwrap_or(exe_dir);
                 let openclaw_dir = install_dir.join("openclaw");
-                return openclaw_dir.to_string_lossy().to_string();
+                if openclaw_dir.join("openclaw.cmd").exists() || openclaw_dir.join("openclaw").exists() {
+                    return openclaw_dir.to_string_lossy().to_string();
+                }
             }
         }
     }
     
-    // Fallback to user home directory
+    // 3. Fallback to user home directory
     home_dir()
         .map(|p| p.join(".openclaw").to_string_lossy().to_string())
         .unwrap_or_else(|| "~/.openclaw".to_string())
@@ -479,6 +508,30 @@ fn find_tool_in_path(name: &str) -> Option<String> {
     }
 }
 
+/// Find QClaw-bundled openclaw binary (not on PATH)
+fn find_qclaw_openclaw() -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        let candidates = [
+            r"D:\Program Files\QClaw\resources\openclaw\openclaw.cmd",
+            r"C:\Program Files\QClaw\resources\openclaw\openclaw.cmd",
+        ];
+        for p in &candidates {
+            if PathBuf::from(p).exists() {
+                return Some(p.to_string());
+            }
+        }
+        // Also check via ProgramFiles env var
+        if let Ok(pf) = std::env::var("ProgramFiles") {
+            let p = format!("{}\\QClaw\\resources\\openclaw\\openclaw.cmd", pf);
+            if PathBuf::from(&p).exists() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
 /// 综合环境诊断
 #[tauri::command]
 async fn diagnose_environment() -> EnvDiagnostics {
@@ -525,10 +578,16 @@ async fn diagnose_environment() -> EnvDiagnostics {
         .find(|t| t.name == "rustc" && t.found)
         .and_then(|t| t.version.clone());
 
-    // OpenClaw
-    let openclaw_found = find_tool_in_path("openclaw").is_some() || find_tool_in_path("openclaw.cmd").is_some();
-    let openclaw_version = if openclaw_found {
-        match run_command_output("openclaw", &["--version"], 10).await {
+    // OpenClaw — also check QClaw bundled path
+    let qclaw_openclaw = find_qclaw_openclaw();
+    let openclaw_found = find_tool_in_path("openclaw").is_some() 
+        || find_tool_in_path("openclaw.cmd").is_some()
+        || qclaw_openclaw.is_some();
+    let openclaw_bin = find_tool_in_path("openclaw")
+        .or_else(|| find_tool_in_path("openclaw.cmd"))
+        .or_else(|| qclaw_openclaw.clone());
+    let openclaw_version = if let Some(bin) = &openclaw_bin {
+        match run_command_output(bin, &["--version"], 10).await {
             Ok((out, _, _)) => Some(out.trim().to_string()),
             Err(e) => {
                 errors.push(format!("获取 openclaw 版本失败: {}", e));
@@ -541,9 +600,9 @@ async fn diagnose_environment() -> EnvDiagnostics {
     };
 
     let openclaw_home = openclaw_home();
-    let openclaw_config_exists = PathBuf::from(&openclaw_home)
-        .join("openclaw.json")
-        .exists();
+    let openclaw_config_exists = get_config_path()
+        .map(|p| PathBuf::from(&p).exists())
+        .unwrap_or(false);
 
     EnvDiagnostics {
         system,
@@ -630,6 +689,7 @@ async fn start_gateway(
     // 找 openclaw 命令
     let openclaw_bin = find_tool_in_path("openclaw")
         .or_else(|| find_tool_in_path("openclaw.cmd"))
+        .or_else(|| find_qclaw_openclaw())
         .unwrap_or_else(|| "openclaw".to_string());
 
     // 在后台启动 gateway
@@ -798,10 +858,15 @@ async fn get_all_variants() -> Result<Vec<VariantStatus>, String> {
     for v in catalog {
         let cli = &v.cli_command;
         let installed = find_tool_in_path(cli).is_some()
-            || find_tool_in_path(&format!("{}.cmd", cli)).is_some();
+            || find_tool_in_path(&format!("{}.cmd", cli)).is_some()
+            || (cli == "openclaw" && find_qclaw_openclaw().is_some());
 
+        let cli_path = find_tool_in_path(cli)
+            .or_else(|| find_tool_in_path(&format!("{}.cmd", cli)))
+            .or_else(|| if cli == "openclaw" { find_qclaw_openclaw() } else { None });
         let version = if installed {
-            match run_command_output(cli, &["--version"], 10).await {
+            let bin = cli_path.as_deref().unwrap_or(cli);
+            match run_command_output(bin, &["--version"], 10).await {
                 Ok((out, _, _)) => Some(out.trim().to_string()),
                 Err(_) => None,
             }
@@ -919,6 +984,7 @@ async fn start_variant_gateway(
     let cli = &variant.cli_command;
     let cli_path = find_tool_in_path(cli)
         .or_else(|| find_tool_in_path(&format!("{}.cmd", cli)))
+        .or_else(|| if cli == "openclaw" { find_qclaw_openclaw() } else { None })
         .ok_or_else(|| format!("未找到 {} 命令，请先安装 {}", variant.name, variant.name))?;
 
     #[cfg(target_os = "windows")]
@@ -985,9 +1051,23 @@ async fn run_command_output_cmd(program: String, args: Vec<String>, timeout_secs
 
 #[tauri::command]
 fn get_config_path() -> Result<String, String> {
-    // Use openclaw_home which prefers install directory over user home
-    let home = openclaw_home();
-    Ok(format!("{}/openclaw.json", home))
+    // Priority: detect actual config file location
+    // 1. ~/.qclaw/openclaw.json (QClaw's config path)
+    // 2. ~/.openclaw/openclaw.json (native OpenClaw's config path)  
+    // 3. Fallback to ~/.qclaw/openclaw.json (default for new installs)
+    if let Some(home) = home_dir() {
+        let qclaw_config = home.join(".qclaw").join("openclaw.json");
+        if qclaw_config.exists() {
+            return Ok(qclaw_config.to_string_lossy().to_string());
+        }
+        let openclaw_config = home.join(".openclaw").join("openclaw.json");
+        if openclaw_config.exists() {
+            return Ok(openclaw_config.to_string_lossy().to_string());
+        }
+        // Neither exists — default to .qclaw path (QClaw is the primary use case)
+        return Ok(qclaw_config.to_string_lossy().to_string());
+    }
+    Err("无法确定用户主目录".to_string())
 }
 
 #[tauri::command]
