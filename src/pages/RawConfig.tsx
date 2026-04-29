@@ -129,22 +129,21 @@ export function RawConfig() {
         </div>
       </div>
 
-      {/* File path info */}
+      {/* File path info - integrated into main content */}
       {configPath && (
         <div style={{
-          padding: '9px 14px', borderRadius: 8, marginBottom: 16,
-          background: 'var(--color-surface-2)',
-          border: '1px solid var(--color-border)',
+          padding: '8px 0', marginBottom: 12,
           display: 'flex', alignItems: 'center', gap: 8,
-          fontSize: 12,
+          fontSize: 12, borderBottom: '1px solid var(--color-border)',
         }}>
-          <svg width="12" height="12" fill="none" stroke="#94A3B8" strokeWidth="2" viewBox="0 0 24 24">
+          <svg width="12" height="12" fill="none" stroke="var(--color-text-muted)" strokeWidth="2" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
           </svg>
-          <code style={{ fontFamily: 'var(--font-family-mono)', color: 'var(--color-text-secondary)' }}>
+          <span style={{ color: 'var(--color-text-muted)' }}>{rt.configPath}:</span>
+          <code style={{ fontFamily: 'var(--font-family-mono)', color: 'var(--color-text-secondary)', flex: 1 }}>
             {configPath}
           </code>
-          <span style={{ marginLeft: 'auto', color: 'var(--color-text-muted)' }}>
+          <span style={{ color: 'var(--color-text-muted)' }}>
             {lineCount} lines
           </span>
         </div>

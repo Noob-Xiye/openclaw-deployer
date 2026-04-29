@@ -396,6 +396,7 @@ export const en = {
     reset: 'Reset',
     save: 'Save',
     editor: 'JSON Editor',
+    configPath: 'Config Path',
     warning: 'Warning',
     warningDesc: 'Directly editing the config file is risky. Invalid config may prevent Gateway from starting.',
     formatJson: 'Format JSON',

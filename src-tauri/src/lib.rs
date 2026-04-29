@@ -224,7 +224,26 @@ fn home_dir() -> Option<PathBuf> {
     }
 }
 
+/// Get OpenClaw home directory - prefer install directory over user home
 fn openclaw_home() -> String {
+    // First, try to use the executable's directory (for portable installs)
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            // Check if we're in a development environment
+            let is_dev = exe_dir.to_string_lossy().contains("target") 
+                || exe_dir.to_string_lossy().contains("debug")
+                || exe_dir.to_string_lossy().contains("release");
+            
+            if !is_dev {
+                // Use the executable's parent directory as the install directory
+                let install_dir = exe_dir.parent().unwrap_or(exe_dir);
+                let openclaw_dir = install_dir.join("openclaw");
+                return openclaw_dir.to_string_lossy().to_string();
+            }
+        }
+    }
+    
+    // Fallback to user home directory
     home_dir()
         .map(|p| p.join(".openclaw").to_string_lossy().to_string())
         .unwrap_or_else(|| "~/.openclaw".to_string())
@@ -949,6 +968,17 @@ async fn start_variant_gateway(
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tauri::command]
+fn file_exists(path: String) -> bool {
+    PathBuf::from(&path).exists()
+}
+
+#[tauri::command]
+async fn run_command_output_cmd(program: String, args: Vec<String>, timeout_secs: u64) -> Result<(String, String, i32), String> {
+    let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    run_command_output(&program, &args_refs, timeout_secs).await
+}
+
+#[tauri::command]
 fn get_config_path() -> Result<String, String> {
     Ok(home_dir()
         .map(|p| p.join(".openclaw").join("openclaw.json").to_string_lossy().to_string())
@@ -1160,6 +1190,8 @@ pub fn run() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             // 核心管理命令
+            file_exists,
+            run_command_output_cmd,
             get_system_info,
             find_tool_in_path,
             diagnose_environment,

@@ -396,6 +396,7 @@ export const zh = {
     reset: '重置',
     save: '保存',
     editor: 'JSON 编辑器',
+    configPath: '配置文件路径',
     warning: '注意',
     warningDesc: '直接编辑配置文件有风险，错误的配置可能导致 Gateway 拒绝启动',
     formatJson: '格式化 JSON',
