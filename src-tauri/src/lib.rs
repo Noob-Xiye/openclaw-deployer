@@ -973,6 +973,11 @@ fn file_exists(path: String) -> bool {
 }
 
 #[tauri::command]
+async fn check_tool_cmd(name: String) -> ToolCheck {
+    check_tool(&name, &[], None).await
+}
+
+#[tauri::command]
 async fn run_command_output_cmd(program: String, args: Vec<String>, timeout_secs: u64) -> Result<(String, String, i32), String> {
     let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     run_command_output(&program, &args_refs, timeout_secs).await
@@ -1192,6 +1197,7 @@ pub fn run() {
             // 核心管理命令
             file_exists,
             run_command_output_cmd,
+            check_tool_cmd,
             get_system_info,
             find_tool_in_path,
             diagnose_environment,

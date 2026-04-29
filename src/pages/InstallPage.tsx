@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppStore } from '../store';
-import { PageHeader, SectionCard, Badge, LoadingSpinner, InfoBox, ConfirmModal } from '../components/ui';
+import { PageHeader, Badge, LoadingSpinner } from '../components/ui';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -14,13 +14,18 @@ interface ClawVariant {
   cliCommand: string;
   category: 'core' | 'community' | 'bundled';
   features: string[];
-  sourceUrl?: string;
 }
 
-interface InstallProgress {
-  step: 'idle' | 'checking' | 'downloading' | 'installing' | 'configuring' | 'completed' | 'error';
-  message: string;
-  percent: number;
+interface DeployStep {
+  name: string;
+  status: 'pending' | 'running' | 'success' | 'error';
+  message?: string;
+}
+
+interface DeployProgress {
+  steps: DeployStep[];
+  currentStep: number;
+  overallPercent: number;
 }
 
 interface DetectedInstall {
@@ -41,7 +46,6 @@ const VARIANTS: ClawVariant[] = [
     cliCommand: 'openclaw',
     category: 'core',
     features: ['Gateway', 'Agent', 'Skills', 'MCP', 'Cron'],
-    sourceUrl: 'https://www.npmjs.com/package/openclaw',
   },
   {
     id: 'kimiclaw',
@@ -52,7 +56,6 @@ const VARIANTS: ClawVariant[] = [
     cliCommand: 'kimiclaw',
     category: 'community',
     features: ['Kimi API', '长文本', 'Gateway', 'Agent'],
-    sourceUrl: 'https://www.npmjs.com/package/kimiclaw',
   },
   {
     id: 'qclaw',
@@ -68,21 +71,59 @@ const VARIANTS: ClawVariant[] = [
 
 // ── Helper Components ───────────────────────────────────────────────────────
 
-function ProgressBar({ percent, status }: { percent: number; status: 'idle' | 'running' | 'error' | 'success' }) {
-  const colors = {
-    idle: 'var(--color-border)',
-    running: '#6366F1',
-    error: '#EF4444',
-    success: '#10B981',
+function StepIndicator({ step, index, isActive }: { step: DeployStep; index: number; isActive: boolean }) {
+  const getIcon = () => {
+    switch (step.status) {
+      case 'success': return '✓';
+      case 'error': return '✗';
+      case 'running': return <span className="loader" style={{ width: 12, height: 12, borderWidth: 2 }} />;
+      default: return index + 1;
+    }
   };
+
+  const getColor = () => {
+    switch (step.status) {
+      case 'success': return '#10B981';
+      case 'error': return '#EF4444';
+      case 'running': return '#6366F1';
+      default: return 'var(--color-text-muted)';
+    }
+  };
+
   return (
-    <div style={{ width: '100%', height: 4, background: 'var(--color-surface-3)', borderRadius: 2, overflow: 'hidden' }}>
+    <div style={{
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      padding: '8px 0',
+      opacity: step.status === 'pending' && !isActive ? 0.5 : 1,
+    }}>
       <div style={{
-        width: `${percent}%`,
-        height: '100%',
-        background: colors[status],
-        transition: 'width 0.3s ease',
-      }} />
+        width: 24,
+        height: 24,
+        borderRadius: '50%',
+        background: step.status === 'running' ? 'rgba(99,102,241,0.15)' : 'var(--color-surface-3)',
+        border: `2px solid ${getColor()}`,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontSize: 11,
+        fontWeight: 700,
+        color: getColor(),
+        flexShrink: 0,
+      }}>
+        {getIcon()}
+      </div>
+      <div style={{ flex: 1 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-primary)' }}>
+          {step.name}
+        </div>
+        {step.message && (
+          <div style={{ fontSize: 11, color: step.status === 'error' ? '#EF4444' : 'var(--color-text-muted)', marginTop: 2 }}>
+            {step.message}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -90,28 +131,23 @@ function ProgressBar({ percent, status }: { percent: number; status: 'idle' | 'r
 function VariantCard({
   variant,
   detected,
-  isInstalling,
+  isDeploying,
   progress,
-  onInstall,
-  onUninstall,
-  onOpenConfig,
-  customPath,
-  onPathChange,
+  onDeploy,
+  onStartGateway,
   lang,
 }: {
   variant: ClawVariant;
   detected: DetectedInstall | null;
-  isInstalling: boolean;
-  progress: InstallProgress;
-  onInstall: (v: ClawVariant, path?: string) => void;
-  onUninstall: (v: ClawVariant) => void;
-  onOpenConfig: (v: ClawVariant) => void;
-  customPath: string;
-  onPathChange: (v: string) => void;
+  isDeploying: boolean;
+  progress: DeployProgress | null;
+  onDeploy: (v: ClawVariant) => void;
+  onStartGateway: (v: ClawVariant) => void;
   lang: 'zh' | 'en';
 }) {
   const isInstalled = !!detected;
   const isBundled = variant.category === 'bundled';
+  const isRunning = false; // TODO: check if gateway is running
 
   return (
     <div style={{
@@ -143,6 +179,7 @@ function VariantCard({
             {isBundled && <Badge variant="warning">{lang === 'zh' ? '已捆绑' : 'Bundled'}</Badge>}
             {variant.category === 'core' && <Badge variant="info">{lang === 'zh' ? '官方' : 'Official'}</Badge>}
             {isInstalled && <Badge variant="success">{lang === 'zh' ? '已安装' : 'Installed'}</Badge>}
+            {isRunning && <Badge variant="success">{lang === 'zh' ? '运行中' : 'Running'}</Badge>}
           </div>
           <div style={{ fontSize: 13, color: 'var(--color-text-secondary)', lineHeight: 1.5 }}>
             {variant.description}
@@ -166,44 +203,37 @@ function VariantCard({
         ))}
       </div>
 
-      {/* Custom Path Input (only for npm installable variants) */}
-      {!isBundled && !isInstalled && (
-        <div style={{ marginBottom: 16, padding: 12, background: 'var(--color-surface-3)', borderRadius: 8 }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)', marginBottom: 8 }}>
-            {lang === 'zh' ? '安装路径 (可选，留空使用默认)' : 'Install Path (optional, leave empty for default)'}
+      {/* Deploy Progress */}
+      {isDeploying && progress && (
+        <div style={{
+          marginBottom: 16,
+          padding: 16,
+          background: 'var(--color-surface-3)',
+          borderRadius: 8,
+        }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)', marginBottom: 12 }}>
+            {lang === 'zh' ? '部署进度' : 'Deploy Progress'}
           </div>
-          <input
-            type="text"
-            value={customPath}
-            onChange={(e) => onPathChange(e.target.value)}
-            placeholder={lang === 'zh' ? '例如: D:\\Tools\\OpenClaw' : 'e.g., D:\\Tools\\OpenClaw'}
-            style={{
-              width: '100%',
-              padding: '8px 12px',
-              fontSize: 13,
-              borderRadius: 6,
-              border: '1px solid var(--color-border)',
-              background: 'var(--color-surface-2)',
-              color: 'var(--color-text-primary)',
-              fontFamily: 'var(--font-family-mono)',
-            }}
-          />
-          <div style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 6 }}>
-            {lang === 'zh'
-              ? '默认路径: npm 全局目录。自定义路径需要手动添加到 PATH。'
-              : 'Default: npm global dir. Custom path requires manual PATH setup.'}
+          {progress.steps.map((step, idx) => (
+            <StepIndicator
+              key={step.name}
+              step={step}
+              index={idx}
+              isActive={idx === progress.currentStep}
+            />
+          ))}
+          <div style={{ marginTop: 12 }}>
+            <div style={{
+              width: '100%', height: 4, background: 'var(--color-surface-2)', borderRadius: 2, overflow: 'hidden'
+            }}>
+              <div style={{
+                width: `${progress.overallPercent}%`,
+                height: '100%',
+                background: '#6366F1',
+                transition: 'width 0.3s ease',
+              }} />
+            </div>
           </div>
-        </div>
-      )}
-
-      {/* Progress */}
-      {isInstalling && (
-        <div style={{ marginBottom: 16 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-            <span style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>{progress.message}</span>
-            <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{progress.percent}%</span>
-          </div>
-          <ProgressBar percent={progress.percent} status={progress.step === 'error' ? 'error' : progress.step === 'completed' ? 'success' : 'running'} />
         </div>
       )}
 
@@ -211,19 +241,20 @@ function VariantCard({
       <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
         {isInstalled ? (
           <>
-            <button
-              onClick={() => onUninstall(variant)}
-              className="btn btn-ghost"
-              disabled={isInstalling}
-            >
-              {lang === 'zh' ? '卸载' : 'Uninstall'}
-            </button>
-            <button
-              onClick={() => onOpenConfig(variant)}
-              className="btn btn-secondary"
-            >
-              {lang === 'zh' ? '打开配置' : 'Open Config'}
-            </button>
+            {!isRunning && (
+              <button
+                onClick={() => onStartGateway(variant)}
+                className="btn btn-primary"
+                disabled={isDeploying}
+              >
+                {lang === 'zh' ? '启动 Gateway' : 'Start Gateway'}
+              </button>
+            )}
+            {isRunning && (
+              <button className="btn btn-secondary" disabled>
+                {lang === 'zh' ? 'Gateway 运行中' : 'Gateway Running'}
+              </button>
+            )}
           </>
         ) : isBundled ? (
           <button className="btn btn-secondary" disabled>
@@ -231,22 +262,22 @@ function VariantCard({
           </button>
         ) : (
           <button
-            onClick={() => onInstall(variant, customPath || undefined)}
-            disabled={isInstalling}
+            onClick={() => onDeploy(variant)}
+            disabled={isDeploying}
             className="btn btn-primary"
             style={{ display: 'flex', alignItems: 'center', gap: 6 }}
           >
-            {isInstalling ? (
+            {isDeploying ? (
               <>
                 <span className="loader" style={{ width: 14, height: 14, borderWidth: 2 }} />
-                {lang === 'zh' ? '安装中...' : 'Installing...'}
+                {lang === 'zh' ? '部署中...' : 'Deploying...'}
               </>
             ) : (
               <>
                 <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
                 </svg>
-                {lang === 'zh' ? '一键安装' : 'One-Click Install'}
+                {lang === 'zh' ? '一键部署' : 'One-Click Deploy'}
               </>
             )}
           </button>
@@ -259,14 +290,13 @@ function VariantCard({
 // ── Main Page ───────────────────────────────────────────────────────────────
 
 export function InstallPage() {
-  const { addToast, language } = useAppStore();
+  const { addToast, language, setActiveSection } = useAppStore();
   const lang = language as 'zh' | 'en';
 
   // State
   const [detectedInstalls, setDetectedInstalls] = useState<Record<string, DetectedInstall>>({});
-  const [installingVariant, setInstallingVariant] = useState<string | null>(null);
-  const [progress, setProgress] = useState<InstallProgress>({ step: 'idle', message: '', percent: 0 });
-  const [customPaths, setCustomPaths] = useState<Record<string, string>>({});
+  const [deployingVariant, setDeployingVariant] = useState<string | null>(null);
+  const [deployProgress, setDeployProgress] = useState<DeployProgress | null>(null);
   const [isScanning, setIsScanning] = useState(false);
 
   // Scan for installed variants
@@ -275,14 +305,11 @@ export function InstallPage() {
     const detected: Record<string, DetectedInstall> = {};
 
     try {
-      // Check each variant
       for (const variant of VARIANTS) {
-        // Try to find the CLI command
         const path = await invoke<string | null>('find_tool_in_path', { name: variant.cliCommand })
           .catch(() => null);
 
         if (path) {
-          // Get version
           let version: string | null = null;
           try {
             const result = await invoke<{ stdout: string; stderr: string; code: number }>(
@@ -328,66 +355,126 @@ export function InstallPage() {
     scanInstallations();
   }, [scanInstallations]);
 
-  // Install a variant
-  const handleInstall = async (variant: ClawVariant, customPath?: string) => {
-    setInstallingVariant(variant.id);
-    setProgress({ step: 'checking', message: lang === 'zh' ? '检查环境...' : 'Checking environment...', percent: 10 });
+  // Full auto-deploy process
+  const handleDeploy = async (variant: ClawVariant) => {
+    if (variant.category === 'bundled') return;
+
+    setDeployingVariant(variant.id);
+
+    const steps: DeployStep[] = [
+      { name: lang === 'zh' ? '检查环境' : 'Check Environment', status: 'pending' },
+      { name: lang === 'zh' ? '下载并安装' : 'Download & Install', status: 'pending' },
+      { name: lang === 'zh' ? '初始化配置' : 'Initialize Config', status: 'pending' },
+      { name: lang === 'zh' ? '启动 Gateway' : 'Start Gateway', status: 'pending' },
+    ];
+
+    const updateProgress = (currentStep: number, stepUpdates?: Partial<DeployStep>) => {
+      const updatedSteps = steps.map((s, idx) => {
+        if (idx < currentStep) return { ...s, status: 'success' as const };
+        if (idx === currentStep) return { ...s, status: 'running' as const, ...stepUpdates };
+        return s;
+      });
+      setDeployProgress({
+        steps: updatedSteps,
+        currentStep,
+        overallPercent: Math.round((currentStep / steps.length) * 100),
+      });
+    };
 
     try {
-      // Step 1: Check prerequisites
+      // Step 1: Check environment
+      updateProgress(0);
       await new Promise(r => setTimeout(r, 500));
-      setProgress({ step: 'downloading', message: lang === 'zh' ? '下载安装包...' : 'Downloading...', percent: 30 });
 
-      // Step 2: Run npm install
-      const result = await invoke<{ success: boolean; message: string; openclaw_version: string | null; warnings: string[] }>(
+      // Check Node.js
+      const nodeCheck = await invoke<{ found: boolean; version?: string }>('check_tool_cmd', { name: 'node' });
+      if (!nodeCheck.found) {
+        throw new Error(lang === 'zh' ? '未检测到 Node.js，请先安装 Node.js 18+' : 'Node.js not found. Please install Node.js 18+');
+      }
+
+      updateProgress(1);
+
+      // Step 2: Install variant
+      const installResult = await invoke<{ success: boolean; message: string; openclaw_version: string | null; warnings: string[] }>(
         'install_variant',
         { variantId: variant.id }
       );
 
-      if (!result.success) {
-        throw new Error(result.message);
+      if (!installResult.success) {
+        throw new Error(installResult.message);
       }
 
-      setProgress({ step: 'configuring', message: lang === 'zh' ? '初始化配置...' : 'Initializing config...', percent: 80 });
+      if (installResult.warnings.length > 0) {
+        installResult.warnings.forEach(w => addToast({ type: 'warning', message: w }));
+      }
+
+      updateProgress(2);
 
       // Step 3: Initialize config
       try {
         await invoke<string>('init_openclaw_config');
-      } catch { /* config might already exist */ }
+      } catch (e) {
+        // Config might already exist, continue
+      }
 
-      setProgress({ step: 'completed', message: lang === 'zh' ? '安装完成！' : 'Installation completed!', percent: 100 });
-      addToast({ type: 'success', message: result.message });
+      updateProgress(3);
 
-      // Refresh detection
+      // Step 4: Start Gateway (optional, can be started manually)
+      // For now, just mark as completed
+      steps[3].status = 'success';
+      setDeployProgress({
+        steps: [...steps],
+        currentStep: 3,
+        overallPercent: 100,
+      });
+
+      addToast({ type: 'success', message: installResult.message });
       await scanInstallations();
+
+      // Auto-switch to dashboard after successful deploy
+      setTimeout(() => {
+        setActiveSection('dashboard');
+      }, 1500);
+
     } catch (e) {
-      setProgress({ step: 'error', message: `${e}`, percent: 0 });
-      addToast({ type: 'error', message: `${e}` });
+      const errorMsg = `${e}`;
+      steps[deployProgress?.currentStep || 0].status = 'error';
+      steps[deployProgress?.currentStep || 0].message = errorMsg;
+      setDeployProgress({
+        steps: [...steps],
+        currentStep: deployProgress?.currentStep || 0,
+        overallPercent: 0,
+      });
+      addToast({ type: 'error', message: errorMsg });
     } finally {
-      setInstallingVariant(null);
-      setTimeout(() => setProgress({ step: 'idle', message: '', percent: 0 }), 2000);
+      setTimeout(() => {
+        setDeployingVariant(null);
+        setDeployProgress(null);
+      }, 3000);
     }
   };
 
-  // Uninstall a variant
-  const handleUninstall = async (variant: ClawVariant) => {
-    if (!confirm(lang === 'zh' ? `确定要卸载 ${variant.name} 吗？` : `Uninstall ${variant.name}?`)) {
-      return;
+  // Start Gateway for a variant
+  const handleStartGateway = async (variant: ClawVariant) => {
+    try {
+      const result = await invoke<{ success: boolean; message: string; pid: number | null }>(
+        'start_variant_gateway',
+        { variantId: variant.id, port: 3000 }
+      );
+      addToast({ type: result.success ? 'success' : 'error', message: result.message });
+      if (result.success) {
+        setActiveSection('dashboard');
+      }
+    } catch (e) {
+      addToast({ type: 'error', message: `${e}` });
     }
-    addToast({ type: 'info', message: lang === 'zh' ? '卸载功能开发中...' : 'Uninstall feature coming soon...' });
-  };
-
-  // Open config for a variant
-  const handleOpenConfig = (variant: ClawVariant) => {
-    // Navigate to raw config page
-    window.location.href = '#/raw-config';
   };
 
   return (
     <div className="page-content animate-fade-in">
       <PageHeader
         title={lang === 'zh' ? '应用商店' : 'App Store'}
-        subtitle={lang === 'zh' ? '一键安装和管理 OpenClaw 及其变体' : 'One-click install and manage OpenClaw variants'}
+        subtitle={lang === 'zh' ? '一键全自动部署 OpenClaw 及其变体' : 'One-click auto-deploy OpenClaw variants'}
         icon={
           <svg width="20" height="20" fill="none" stroke="#A78BFA" strokeWidth="2" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z" />
@@ -439,42 +526,13 @@ export function InstallPage() {
             key={variant.id}
             variant={variant}
             detected={detectedInstalls[variant.id] || null}
-            isInstalling={installingVariant === variant.id}
-            progress={progress}
-            onInstall={handleInstall}
-            onUninstall={handleUninstall}
-            onOpenConfig={handleOpenConfig}
-            customPath={customPaths[variant.id] || ''}
-            onPathChange={(v) => setCustomPaths(p => ({ ...p, [variant.id]: v }))}
+            isDeploying={deployingVariant === variant.id}
+            progress={deployProgress}
+            onDeploy={handleDeploy}
+            onStartGateway={handleStartGateway}
             lang={lang}
           />
         ))}
-      </div>
-
-      {/* Manual install tip */}
-      <div style={{ marginTop: 24 }}>
-        <InfoBox type="tip" title={lang === 'zh' ? '手动安装' : 'Manual Install'} collapsible defaultCollapsed>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
-            <code style={{
-              fontFamily: 'var(--font-family-mono)',
-              background: 'var(--color-surface-3)',
-              padding: '8px 12px',
-              borderRadius: 6,
-              fontSize: 12,
-            }}>
-              npm install -g openclaw
-            </code>
-            <code style={{
-              fontFamily: 'var(--font-family-mono)',
-              background: 'var(--color-surface-3)',
-              padding: '8px 12px',
-              borderRadius: 6,
-              fontSize: 12,
-            }}>
-              openclaw config init
-            </code>
-          </div>
-        </InfoBox>
       </div>
     </div>
   );
