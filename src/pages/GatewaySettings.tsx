@@ -22,7 +22,17 @@ export function GatewaySettings() {
   }, [config?.gateway]);
 
   const handleSave = () => {
-    if (!config) return;
+    // If no config exists yet, create a new one with gateway settings
+    if (!config) {
+      saveConfig({
+        gateway: local,
+        agents: { defaults: { model: { primary: 'qclaw/modelroute' }, heartbeat: true, every: '30m' }, list: [] },
+        channels: {},
+        tools: {},
+        skills: {},
+      } as any);
+      return;
+    }
     saveConfig({ ...config, gateway: local });
   };
 

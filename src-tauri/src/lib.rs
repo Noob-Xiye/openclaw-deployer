@@ -985,9 +985,9 @@ async fn run_command_output_cmd(program: String, args: Vec<String>, timeout_secs
 
 #[tauri::command]
 fn get_config_path() -> Result<String, String> {
-    Ok(home_dir()
-        .map(|p| p.join(".openclaw").join("openclaw.json").to_string_lossy().to_string())
-        .unwrap_or_else(|| "~/.openclaw/openclaw.json".to_string()))
+    // Use openclaw_home which prefers install directory over user home
+    let home = openclaw_home();
+    Ok(format!("{}/openclaw.json", home))
 }
 
 #[tauri::command]
@@ -997,12 +997,40 @@ fn get_openclaw_home_cmd() -> String {
 
 #[tauri::command]
 fn read_config_file(path: String) -> Result<String, String> {
+    if !PathBuf::from(&path).exists() {
+        // Return default config if file doesn't exist
+        return Ok(DEFAULT_CONFIG.to_string());
+    }
     fs::read_to_string(&path).map_err(|e| format!("读取配置文件失败: {}", e))
 }
 
+/// Default OpenClaw configuration for first-time setup
+const DEFAULT_CONFIG: &str = r#"{
+  "gateway": {
+    "port": 18789,
+    "bind": "127.0.0.1",
+    "auth": { "mode": "token", "token": "" },
+    "reload": { "mode": "hybrid" }
+  },
+  "agents": {
+    "defaults": {
+      "model": { "primary": "qclaw/modelroute" },
+      "heartbeat": true
+    },
+    "list": []
+  },
+  "channels": {},
+  "tools": {},
+  "skills": {}
+}"#;
+
 #[tauri::command]
 fn write_config_file(path: String, content: String) -> Result<(), String> {
-    // 写前备份
+    // Ensure parent directory exists
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败: {}", e))?;
+    }
+    // Write backup if file exists
     let backup_path = format!("{}.bak", path);
     if let Ok(existing) = fs::read_to_string(&path) {
         let _ = fs::write(&backup_path, &existing);
