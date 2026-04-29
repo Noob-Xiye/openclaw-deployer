@@ -111,7 +111,8 @@ export function ChatPage() {
   // 仅在 config 加载完成后执行，避免以空 token 建立连接后立即因 token 变更而断开。
   useEffect(() => {
     if (!configLoaded) return;
-    gatewayClient.setConfig({ port: Number(port), token });
+    console.log('[ChatPage] configLoaded=true, port=', port, 'token=', token ? token.substring(0,8)+'...' : '(empty)');
+    gatewayClient.setConfig({ port: Number(port), token});
     const unsub = gatewayClient.onStateChange((s) => {
       setGwState(s);
       if (s === 'connected') setHasConnected(true);

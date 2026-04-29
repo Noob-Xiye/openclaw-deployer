@@ -323,6 +323,7 @@ class GatewayWsClient {
 
       const { port, token } = this.config;
       this._setState('connecting');
+      console.log('[gatewayWs] _doConnect: connecting to ws://127.0.0.1:' + port, 'token=', token ? token.substring(0,8)+'...' : '(empty)');
 
       let ws: WebSocket;
       try {
@@ -415,14 +416,16 @@ class GatewayWsClient {
         }
       };
 
-      ws.onerror = () => {
+      ws.onerror = (err) => {
+        console.error('[gatewayWs] WebSocket onerror:', err, 'readyState=', ws.readyState);
         clearTimeout(connectTimer);
         this._setState('error');
         reject(new Error('WebSocket 连接失败'));
         this._scheduleReconnect();
       };
 
-      ws.onclose = () => {
+      ws.onclose = (ev) => {
+        console.warn('[gatewayWs] WebSocket onclose: code=', ev?.code, 'reason=', ev?.reason, 'wasClean=', ev?.wasClean);
         clearTimeout(connectTimer);
         if (this._state === 'connecting') {
           this._setState('disconnected');

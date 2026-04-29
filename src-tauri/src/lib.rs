@@ -1104,6 +1104,79 @@ const DEFAULT_CONFIG: &str = r#"{
   "skills": {}
 }"#;
 
+/// Ensure the config allows Tauri WebView to connect via WebSocket.
+/// Adds Tauri origins to allowedOrigins and enables allowInsecureAuth if needed.
+#[tauri::command]
+fn ensure_control_ui_allowed(config_path: String) -> Result<String, String> {
+    let content = fs::read_to_string(&config_path)
+        .map_err(|e| format!("read config failed: {}", e))?;
+    let mut cfg: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("parse config JSON failed: {}", e))?;
+
+    // Origins that Tauri WebView may use
+    let tauri_origins = [
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://localhost:5175",
+        "http://localhost:5176",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:5174",
+        "http://127.0.0.1:5175",
+        "http://127.0.0.1:5176",
+        "tauri://localhost",
+        "https://tauri.localhost",
+        "null",
+    ];
+
+    // Navigate to gateway.controlUi using value mutations
+    let control_ui = if let Some(gw) = cfg.get_mut("gateway") {
+        if let Some(cui) = gw.get_mut("controlUi") {
+            Some(cui)
+        } else {
+            gw.as_object_mut().unwrap().insert("controlUi".into(), serde_json::json!({}));
+            gw.get_mut("controlUi")
+        }
+    } else {
+        None
+    };
+
+    if let Some(cui) = control_ui {
+        // Update allowedOrigins array
+        if let Some(arr) = cui.get_mut("allowedOrigins") {
+            if let Some(origins) = arr.as_array_mut() {
+                for origin in &tauri_origins {
+                    let val = serde_json::Value::String(origin.to_string());
+                    if !origins.contains(&val) {
+                        origins.push(val);
+                    }
+                }
+            }
+        } else {
+            let mut origins_vec = Vec::new();
+            for origin in &tauri_origins {
+                origins_vec.push(serde_json::Value::String(origin.to_string()));
+            }
+            cui.as_object_mut().unwrap().insert(
+                "allowedOrigins".into(),
+                serde_json::Value::Array(origins_vec),
+            );
+        }
+
+        // Set allowInsecureAuth to true
+        cui.as_object_mut().unwrap().insert(
+            "allowInsecureAuth".into(),
+            serde_json::Value::Bool(true),
+        );
+    }
+
+    // Write back
+    let updated = serde_json::to_string_pretty(&cfg)
+        .map_err(|e| format!("serialize config failed: {}", e))?;
+    write_config_file(config_path, updated)?;
+
+    Ok("updated allowedOrigins + allowInsecureAuth".to_string())
+}
+
 #[tauri::command]
 fn write_config_file(path: String, content: String) -> Result<(), String> {
     // Ensure parent directory exists
@@ -1323,6 +1396,7 @@ pub fn run() {
             start_variant_gateway,
             // 保留的蓝本命令
             get_config_path,
+            ensure_control_ui_allowed,
             get_openclaw_home_cmd,
             read_config_file,
             write_config_file,

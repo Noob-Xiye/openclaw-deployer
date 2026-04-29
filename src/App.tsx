@@ -43,19 +43,30 @@ function App() {
     }
   }, [theme]);
 
-  // Boot: detect openclaw home → read config → connect Gateway WS
+  // Boot: detect openclaw home → read config → ensure Tauri origin allowed → connect Gateway WS
   useEffect(() => {
     const boot = async () => {
       await initPaths();
       await loadConfig();
       // After loadConfig, sync the fresh configPath from Rust backend to store
-      // (Zustand persist may have stale old path like ~/.openclaw/openclaw.json)
+      let freshPath = '';
       try {
         const { getConfigService } = await import('./services/config');
-        const freshPath = await getConfigService().getConfigPath();
+        freshPath = await getConfigService().getConfigPath();
         useAppStore.setState({ configPath: freshPath });
       } catch {
-        // ignore — loadConfig already succeeded with correct path
+        // ignore
+      }
+      // Ensure Tauri WebView origins are allowed in config
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const cfgPath = freshPath || useAppStore.getState().configPath;
+        const result = await invoke<string>('ensure_control_ui_allowed', { configPath: cfgPath });
+        console.log('[App] ensure_control_ui_allowed:', result);
+        // Reload config after modification
+        await loadConfig();
+      } catch (e) {
+        console.warn('[App] ensure_control_ui_allowed failed:', e);
       }
     };
     boot();
@@ -66,6 +77,7 @@ function App() {
     if (config?.gateway) {
       const port = config.gateway.port || 18789;
       const token = config.gateway.auth?.token || '';
+      console.log('[App] setConfig: port=', port, 'token=', token ? token.substring(0,8)+'...' : '(empty)', 'gwState=', gatewayClient.state);
       gatewayClient.setConfig({ port, token });
       // Auto-connect if not already connected
       if (gatewayClient.state === 'disconnected') {
