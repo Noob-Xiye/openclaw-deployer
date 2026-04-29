@@ -48,6 +48,15 @@ function App() {
     const boot = async () => {
       await initPaths();
       await loadConfig();
+      // After loadConfig, sync the fresh configPath from Rust backend to store
+      // (Zustand persist may have stale old path like ~/.openclaw/openclaw.json)
+      try {
+        const { getConfigService } = await import('./services/config');
+        const freshPath = await getConfigService().getConfigPath();
+        useAppStore.setState({ configPath: freshPath });
+      } catch {
+        // ignore — loadConfig already succeeded with correct path
+      }
     };
     boot();
   }, []);

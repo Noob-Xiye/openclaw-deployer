@@ -30,7 +30,9 @@ class TauriConfigService implements ConfigService {
   }
 
   async loadConfig(path?: string): Promise<OpenClawConfig> {
-    const configPath = path || await this.getConfigPath();
+    // Always fetch fresh config path from Rust backend — ignore cached value.
+    // This prevents stale ~/.openclaw paths from persisted Zustand state.
+    const configPath = path || await invoke<string>('get_config_path');
     const content = await invoke<string>('read_config_file', { path: configPath });
     try {
       return JSON.parse(content) as OpenClawConfig;
@@ -40,7 +42,8 @@ class TauriConfigService implements ConfigService {
   }
 
   async saveConfig(config: OpenClawConfig, path?: string): Promise<void> {
-    const configPath = path || await this.getConfigPath();
+    // Always fetch fresh config path from Rust backend
+    const configPath = path || await invoke<string>('get_config_path');
     const content = JSON.stringify(config, null, 2);
     await invoke('write_config_file', { path: configPath, content });
   }
