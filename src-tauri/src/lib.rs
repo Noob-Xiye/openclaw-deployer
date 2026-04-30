@@ -1167,6 +1167,13 @@ fn ensure_control_ui_allowed(config_path: String) -> Result<String, String> {
             "allowInsecureAuth".into(),
             serde_json::Value::Bool(true),
         );
+
+        // Disable device identity requirement for Tauri WebView
+        // (Tauri WebView has no Ed25519 keypair / device.json)
+        cui.as_object_mut().unwrap().insert(
+            "dangerouslyDisableDeviceAuth".into(),
+            serde_json::Value::Bool(true),
+        );
     }
 
     // Write back
@@ -1174,7 +1181,7 @@ fn ensure_control_ui_allowed(config_path: String) -> Result<String, String> {
         .map_err(|e| format!("serialize config failed: {}", e))?;
     write_config_file(config_path, updated)?;
 
-    Ok("updated allowedOrigins + allowInsecureAuth".to_string())
+    Ok("updated allowedOrigins + allowInsecureAuth + dangerouslyDisableDeviceAuth".to_string())
 }
 
 #[tauri::command]
