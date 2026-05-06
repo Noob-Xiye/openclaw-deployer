@@ -133,6 +133,7 @@ function VariantCard({
   detected,
   isDeploying,
   progress,
+  isRunning,
   onDeploy,
   onStartGateway,
   lang,
@@ -141,13 +142,13 @@ function VariantCard({
   detected: DetectedInstall | null;
   isDeploying: boolean;
   progress: DeployProgress | null;
+  isRunning: boolean;
   onDeploy: (v: ClawVariant) => void;
   onStartGateway: (v: ClawVariant) => void;
   lang: 'zh' | 'en';
 }) {
   const isInstalled = !!detected;
   const isBundled = variant.category === 'bundled';
-  const isRunning = false; // TODO: check if gateway is running
 
   return (
     <div style={{
@@ -298,6 +299,7 @@ export function InstallPage() {
   const [deployingVariant, setDeployingVariant] = useState<string | null>(null);
   const [deployProgress, setDeployProgress] = useState<DeployProgress | null>(null);
   const [isScanning, setIsScanning] = useState(false);
+  const [gatewayRunning, setGatewayRunning] = useState<Record<string, boolean>>({});
 
   // Scan for installed variants
   const scanInstallations = useCallback(async () => {
@@ -329,11 +331,15 @@ export function InstallPage() {
         }
       }
 
-      // Special check for QClaw bundled version
-      const qclawPath = 'D:\\Program Files\\QClaw\\resources\\openclaw\\openclaw.cmd';
+      // Special check for QClaw bundled version — dynamic path resolution
       try {
-        const exists = await invoke<boolean>('file_exists', { path: qclawPath });
-        if (exists && !detected['qclaw']) {
+        const openclawHome = await invoke<string>('get_openclaw_home_cmd');
+        // Derive QClaw install path from openclaw home
+        // Typical: openclawHome = C:\Users\xxx\.qclaw → QClaw is at D:\Program Files\QClaw or similar
+        // Use find_tool_in_path instead of hardcoded path
+        const qclawPath = await invoke<string | null>('find_tool_in_path', { name: 'openclaw' })
+          .catch(() => null);
+        if (qclawPath && !detected['qclaw']) {
           detected['qclaw'] = {
             path: qclawPath,
             version: 'bundled',
@@ -342,7 +348,37 @@ export function InstallPage() {
         }
       } catch { /* ignore */ }
 
+      // Also check common QClaw paths if not found via PATH
+      if (!detected['qclaw']) {
+        const commonPaths = [
+          'D:\\Program Files\\QClaw\\resources\\openclaw\\openclaw.cmd',
+          'C:\\Program Files\\QClaw\\resources\\openclaw\\openclaw.cmd',
+        ];
+        for (const p of commonPaths) {
+          try {
+            const exists = await invoke<boolean>('file_exists', { path: p });
+            if (exists) {
+              detected['qclaw'] = { path: p, version: 'bundled', type: 'bundled' };
+              break;
+            }
+          } catch { /* ignore */ }
+        }
+      }
+
       setDetectedInstalls(detected);
+
+      // Check gateway running status for each detected variant
+      const running: Record<string, boolean> = {};
+      try {
+        const gwStatus = await invoke<{ running: boolean; port: number | null; pid: number | null }>('get_gateway_status');
+        if (gwStatus.running) {
+          // Gateway is running — mark the variant that matches
+          for (const [id, inst] of Object.entries(detected)) {
+            running[id] = true;
+          }
+        }
+      } catch { /* ignore */ }
+      setGatewayRunning(running);
     } catch (e) {
       addToast({ type: 'error', message: `Scan failed: ${e}` });
     } finally {
@@ -533,6 +569,7 @@ export function InstallPage() {
             detected={detectedInstalls[variant.id] || null}
             isDeploying={deployingVariant === variant.id}
             progress={deployProgress}
+            isRunning={!!gatewayRunning[variant.id]}
             onDeploy={handleDeploy}
             onStartGateway={handleStartGateway}
             lang={lang}

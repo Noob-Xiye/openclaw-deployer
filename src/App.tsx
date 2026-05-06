@@ -17,6 +17,7 @@ import { SessionsPage } from './pages/SessionsPage';
 import { InstancesPage } from './pages/InstancesPage';
 import { SecurityPage } from './pages/SecurityPage';
 import { InstallPage } from './pages/InstallPage';
+import { LocalModelsPage } from './pages/LocalModelsPage';
 import { gatewayClient } from './services/gatewayWs';
 
 import './index.css';
@@ -102,6 +103,7 @@ function App() {
       case 'instances':  return <InstancesPage />;
       case 'security':   return <SecurityPage />;
       case 'install':    return <InstallPage />;
+      case 'localModels': return <LocalModelsPage />;
       default:           return <Dashboard />;
     }
   };

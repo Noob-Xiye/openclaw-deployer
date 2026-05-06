@@ -9,9 +9,10 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, System};
-use tauri::State;
+use tauri::{Emitter, State};
 use tokio::process::Command;
 use tokio::time::sleep;
+use tokio::io::AsyncBufReadExt;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 进程状态管理（全局）
@@ -1030,6 +1031,506 @@ async fn start_variant_gateway(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 本地模型相关类型和命令
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GpuInfo {
+    pub name: String,
+    pub vram_total_mb: u64,
+    pub vram_used_mb: u64,
+    pub driver_version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HardwareProfile {
+    pub cpu_name: String,
+    pub cpu_cores: usize,
+    pub ram_total_gb: f64,
+    pub gpus: Vec<GpuInfo>,
+    pub max_vram_mb: u64,  // 最大的 GPU VRAM，0 表示无独立显卡
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OllamaModel {
+    pub name: String,
+    pub tag: String,
+    pub size_bytes: u64,
+    pub modified_at: String,
+    pub digest: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OllamaStatus {
+    pub running: bool,
+    pub version: Option<String>,
+    pub models: Vec<OllamaModel>,
+    pub base_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OllamaPullProgress {
+    pub status: String,
+    pub digest: Option<String>,
+    pub total: Option<u64>,
+    pub completed: Option<u64>,
+}
+
+/// 检测 GPU 信息（nvidia-smi）
+fn detect_gpus() -> Vec<GpuInfo> {
+    let mut gpus = Vec::new();
+
+    // 尝试 nvidia-smi
+    let output = std::process::Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=name,memory.total,memory.used,driver_version",
+            "--format=csv,noheader,nounits",
+        ])
+        .output();
+
+    if let Ok(out) = output {
+        if out.status.success() {
+            let stdout = decode_output(&out.stdout);
+            for line in stdout.lines() {
+                let parts: Vec<&str> = line.split(',').map(|s: &str| s.trim()).collect();
+                if parts.len() >= 4 {
+                    let vram_total = parts[1].parse::<u64>().unwrap_or(0);
+                    let vram_used = parts[2].parse::<u64>().unwrap_or(0);
+                    gpus.push(GpuInfo {
+                        name: parts[0].to_string(),
+                        vram_total_mb: vram_total,
+                        vram_used_mb: vram_used,
+                        driver_version: parts[3].to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    gpus
+}
+
+/// 获取硬件配置档案
+#[tauri::command]
+fn get_hardware_profile() -> HardwareProfile {
+    let mut sys = System::new_all();
+    sys.refresh_all();
+
+    let cpu_name = sys.cpus().first()
+        .map(|c| c.brand().to_string())
+        .unwrap_or_else(|| "Unknown CPU".to_string());
+
+    let gpus = detect_gpus();
+    let max_vram = gpus.iter().map(|g| g.vram_total_mb).max().unwrap_or(0);
+
+    HardwareProfile {
+        cpu_name,
+        cpu_cores: sys.cpus().len(),
+        ram_total_gb: (sys.total_memory() as f64 / 1_073_741_824.0 * 100.0).round() / 100.0,
+        gpus,
+        max_vram_mb: max_vram,
+    }
+}
+
+/// 检测 Ollama 运行状态和已安装模型
+#[tauri::command]
+async fn get_ollama_status() -> OllamaStatus {
+    let base_url = "http://127.0.0.1:11434".to_string();
+    let mut running = false;
+    let mut version: Option<String> = None;
+    let mut models: Vec<OllamaModel> = Vec::new();
+
+    // 使用 TCP + 原始 HTTP 请求检测（跨平台，零外部依赖）
+    // 先尝试 TCP 连接
+    {
+        use std::net::TcpStream;
+        use std::time::Duration;
+        if let Ok(mut stream) = TcpStream::connect_timeout(
+            &"127.0.0.1:11434".parse::<std::net::SocketAddr>().unwrap(),
+            Duration::from_millis(1500),
+        ) {
+            stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            
+            // 发送 HTTP GET /api/version
+            let request = format!("GET /api/version HTTP/1.1\r\nHost: 127.0.0.1:11434\r\nConnection: close\r\n\r\n");
+            if std::io::Write::write_all(&mut stream, request.as_bytes()).is_ok() {
+                
+                let mut response = String::new();
+                if std::io::Read::read_to_string(&mut stream, &mut response).is_ok() {
+                    // 检查 HTTP 200
+                    if response.contains("HTTP/1.1 200") || response.contains("HTTP/1.0 200") {
+                        running = true;
+                        // 解析 JSON 响应体
+                        if let Some(body_start) = response.find("\r\n\r\n") {
+                            let body = &response[body_start + 4..];
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+                                version = v.get("version").and_then(|v| v.as_str()).map(|s| s.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if running {
+        // 获取模型列表
+        if let Ok((body, _, _)) = run_command_output(
+            "curl", &["-s", &format!("{}/api/tags", base_url)], 10
+        ).await {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                if let Some(arr) = v.get("models").and_then(|v| v.as_array()) {
+                    for m in arr {
+                        models.push(OllamaModel {
+                            name: m.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                            tag: m.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                            size_bytes: m.get("size").and_then(|v| v.as_u64()).unwrap_or(0),
+                            modified_at: m.get("modified_at").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                            digest: m.get("digest").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    OllamaStatus {
+        running,
+        version,
+        models,
+        base_url,
+    }
+}
+
+/// 安装 Ollama（Windows：winget 或下载安装包）
+#[tauri::command]
+async fn install_ollama() -> Result<InstallResult, String> {
+    // 检查是否已安装
+    let ollama_found = find_tool_in_path("ollama").is_some()
+        || find_tool_in_path("ollama.exe").is_some();
+
+    if ollama_found {
+        return Ok(InstallResult {
+            success: true,
+            message: "Ollama 已安装".to_string(),
+            openclaw_version: None,
+            warnings: vec![],
+        });
+    }
+
+    // 尝试 winget 安装
+    let winget_found = find_tool_in_path("winget").is_some()
+        || find_tool_in_path("winget.exe").is_some();
+
+    if winget_found {
+        let (stdout, stderr, code) = run_command_output(
+            "winget", &["install", "Ollama.Ollama", "--accept-source-agreements", "--accept-package-agreements"],
+            600,
+        ).await?;
+
+        if code == 0 {
+            return Ok(InstallResult {
+                success: true,
+                message: "Ollama 安装成功！请重启应用以刷新 PATH。".to_string(),
+                openclaw_version: None,
+                warnings: vec![],
+            });
+        } else {
+            let err = if stderr.is_empty() { stdout } else { stderr };
+            return Err(format!("winget 安装 Ollama 失败: {}。请手动从 https://ollama.com/download 下载安装。", err));
+        }
+    }
+
+    // 没有 winget，提示手动安装
+    Err("未检测到 winget，请手动从 https://ollama.com/download 下载安装 Ollama".to_string())
+}
+
+/// 通过 Ollama 拉取模型
+#[tauri::command]
+async fn ollama_pull_model(model_name: String) -> Result<String, String> {
+    let ollama_bin = find_tool_in_path("ollama")
+        .or_else(|| find_tool_in_path("ollama.exe"))
+        .ok_or_else(|| "未找到 ollama 命令，请先安装 Ollama".to_string())?;
+
+    // 后台执行 ollama pull，最长等待 10 分钟
+    let (stdout, stderr, code) = run_command_output(
+        &ollama_bin, &["pull", &model_name], 600
+    ).await?;
+
+    if code == 0 || stdout.contains("success") || stdout.contains("pulling") {
+        Ok(format!("模型 {} 拉取成功", model_name))
+    } else {
+        let err = if stderr.is_empty() { stdout } else { stderr };
+        Err(format!("拉取模型 {} 失败: {}", model_name, err))
+    }
+}
+
+/// 删除 Ollama 模型
+#[tauri::command]
+async fn ollama_delete_model(model_name: String) -> Result<String, String> {
+    let ollama_bin = find_tool_in_path("ollama")
+        .or_else(|| find_tool_in_path("ollama.exe"))
+        .ok_or_else(|| "未找到 ollama 命令".to_string())?;
+
+    let (stdout, stderr, code) = run_command_output(
+        &ollama_bin, &["rm", &model_name], 30
+    ).await?;
+
+    if code == 0 || stdout.contains("deleted") {
+        Ok(format!("模型 {} 已删除", model_name))
+    } else {
+        let err = if stderr.is_empty() { stdout } else { stderr };
+        Err(format!("删除模型 {} 失败: {}", model_name, err))
+    }
+}
+
+// ── 磁盘分区 ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiskPartition {
+    pub mount_point: String,
+    pub label: String,
+    pub fs_type: String,
+    pub total_gb: f64,
+    pub free_gb: f64,
+    pub recommended: bool,
+}
+
+/// 获取磁盘分区列表，按可用空间降序排列，最多 6 个
+#[tauri::command]
+fn get_disk_partitions() -> Vec<DiskPartition> {
+    use sysinfo::Disks;
+    let mut disks = Disks::new();
+    disks.refresh_list();
+
+    let mut partitions: Vec<DiskPartition> = disks.list().iter().map(|d| {
+        let total = d.total_space() as f64 / 1_073_741_824.0;
+        let free = d.available_space() as f64 / 1_073_741_824.0;
+        DiskPartition {
+            mount_point: d.mount_point().to_string_lossy().to_string(),
+            label: d.name().to_string_lossy().to_string(),
+            fs_type: d.file_system().to_string_lossy().to_string(),
+            total_gb: (total * 100.0).round() / 100.0,
+            free_gb: (free * 100.0).round() / 100.0,
+            recommended: false,
+        }
+    }).collect();
+
+    // 按可用空间降序排列
+    partitions.sort_by(|a, b| b.free_gb.partial_cmp(&a.free_gb).unwrap_or(std::cmp::Ordering::Equal));
+
+    // 标记可用空间最大的分区
+    if !partitions.is_empty() {
+        partitions[0].recommended = true;
+    }
+
+    // 最多返回 6 个
+    partitions.truncate(6);
+    partitions
+}
+
+/// 获取当前 Ollama 模型存储路径
+#[tauri::command]
+fn get_ollama_models_dir() -> String {
+    // 优先检查环境变量
+    if let Ok(dir) = std::env::var("OLLAMA_MODELS") {
+        return dir;
+    }
+    // 默认路径
+    if let Some(home) = dirs::home_dir() {
+        return home.join(".ollama").join("models").to_string_lossy().to_string();
+    }
+    "C:\\Users\\.ollama\\models".to_string()
+}
+
+/// 设置 Ollama 模型存储路径（Windows: setx）
+#[tauri::command]
+async fn set_ollama_models_dir(path: String) -> Result<String, String> {
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        std::fs::create_dir_all(p)
+            .map_err(|e| format!("创建目录失败: {}", e))?;
+    }
+
+    // Windows: setx 设置用户级环境变量
+    let (stdout, stderr, code) = run_command_output(
+        "setx", &["OLLAMA_MODELS", &path], 10
+    ).await?;
+
+    if code != 0 {
+        let err = if stderr.is_empty() { stdout } else { stderr };
+        return Err(format!("设置环境变量失败: {}", err));
+    }
+
+    Ok(format!("已设置 OLLAMA_MODELS={:?}。请重启 Ollama 使其生效。", path))
+}
+
+// ── 流式拉取进度 ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PullProgressEvent {
+    pub model: String,
+    pub status: String,
+    pub percent: u32,
+}
+
+/// 解析 ollama pull 输出中的进度百分比
+fn parse_pull_percent(line: &str) -> u32 {
+    // 匹配 "48%" 或 "100%" 等百分比
+    if let Some(pos) = line.rfind('%') {
+        let before = &line[..pos];
+        let num_start = before.rfind(|c: char| !c.is_ascii_digit())
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        if let Ok(pct) = before[num_start..].parse::<u32>() {
+            return pct.min(99); // 100% 只在最终 success 时设置
+        }
+    }
+    // 匹配 "pulling manifest" / "verifying" 等早期阶段
+    let lower = line.to_lowercase();
+    if lower.contains("success") || lower.contains("complete") {
+        return 100;
+    }
+    if lower.contains("verifying") || lower.contains("writing") {
+        return 95;
+    }
+    if lower.contains("pulling manifest") {
+        return 2;
+    }
+    0
+}
+
+/// 流式拉取模型，通过 Tauri 事件实时推送进度
+#[tauri::command]
+async fn ollama_pull_model_stream(
+    app: tauri::AppHandle,
+    model_name: String,
+) -> Result<String, String> {
+    let ollama_bin = find_tool_in_path("ollama")
+        .or_else(|| find_tool_in_path("ollama.exe"))
+        .ok_or_else(|| "未找到 ollama 命令，请先安装 Ollama".to_string())?;
+
+    // 发送初始状态
+    let _ = app.emit("ollama-pull-progress", PullProgressEvent {
+        model: model_name.clone(),
+        status: "starting".to_string(),
+        percent: 1,
+    });
+
+    let mut child = tokio::process::Command::new(&ollama_bin)
+        .arg("pull")
+        .arg(&model_name)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("启动 ollama pull 失败: {}", e))?;
+
+    // 分别读取 stdout 和 stderr
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    let app_out = app.clone();
+    let model_out = model_name.clone();
+    let stdout_handle = tokio::spawn(async move {
+        if let Some(out) = stdout {
+            let reader = tokio::io::BufReader::new(out);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let percent = parse_pull_percent(&line);
+                let _ = app_out.emit("ollama-pull-progress", PullProgressEvent {
+                    model: model_out.clone(),
+                    status: line,
+                    percent,
+                });
+            }
+        }
+    });
+
+    let app_err = app.clone();
+    let model_err = model_name.clone();
+    let stderr_handle = tokio::spawn(async move {
+        if let Some(err) = stderr {
+            let reader = tokio::io::BufReader::new(err);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let percent = parse_pull_percent(&line);
+                let _ = app_err.emit("ollama-pull-progress", PullProgressEvent {
+                    model: model_err.clone(),
+                    status: line,
+                    percent,
+                });
+            }
+        }
+    });
+
+    // 等待进程结束
+    let status = child.wait().await
+        .map_err(|e| format!("等待进程结束失败: {}", e))?;
+
+    // 等待读取完成
+    let _ = stdout_handle.await;
+    let _ = stderr_handle.await;
+
+    if status.success() {
+        let _ = app.emit("ollama-pull-progress", PullProgressEvent {
+            model: model_name.clone(),
+            status: "success".to_string(),
+            percent: 100,
+        });
+        Ok(format!("模型 {} 拉取成功", model_name))
+    } else {
+        let _ = app.emit("ollama-pull-progress", PullProgressEvent {
+            model: model_name.clone(),
+            status: "failed".to_string(),
+            percent: 0,
+        });
+        Err(format!("拉取模型 {} 失败", model_name))
+    }
+}
+
+/// 一键配置 OpenClaw 使用 Ollama 本地模型
+#[tauri::command]
+async fn configure_ollama_model(model_id: String) -> Result<String, String> {
+    let config_path = get_config_path()?;
+    let content = fs::read_to_string(&config_path)
+        .map_err(|e| format!("读取配置失败: {}", e))?;
+    let mut cfg: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("解析配置失败: {}", e))?;
+
+    // 确保 models.providers.ollama 存在
+    if cfg.get("models").is_none() {
+        cfg["models"] = serde_json::json!({});
+    }
+    if cfg["models"].get("providers").is_none() {
+        cfg["models"]["providers"] = serde_json::json!({});
+    }
+
+    // 设置 ollama provider（自动发现模式，不需要手动列模型）
+    cfg["models"]["providers"]["ollama"] = serde_json::json!({
+        "apiKey": "ollama-local"
+    });
+
+    // 设置默认模型
+    let full_model_id = format!("ollama/{}", model_id);
+    if cfg.get("agents").is_none() {
+        cfg["agents"] = serde_json::json!({});
+    }
+    if cfg["agents"].get("defaults").is_none() {
+        cfg["agents"]["defaults"] = serde_json::json!({});
+    }
+    cfg["agents"]["defaults"]["model"] = serde_json::json!({
+        "primary": full_model_id
+    });
+
+    // 写回配置
+    let updated = serde_json::to_string_pretty(&cfg)
+        .map_err(|e| format!("序列化配置失败: {}", e))?;
+    write_config_file(config_path, updated)?;
+
+    Ok(format!("已将默认模型切换为 {}", full_model_id))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 保留原有命令（来自 tddt 的蓝本）
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1401,6 +1902,17 @@ pub fn run() {
             get_deploy_paths,
             save_deploy_paths,
             start_variant_gateway,
+            // 本地模型命令
+            get_hardware_profile,
+            get_ollama_status,
+            install_ollama,
+            ollama_pull_model,
+            ollama_pull_model_stream,
+            ollama_delete_model,
+            configure_ollama_model,
+            get_disk_partitions,
+            get_ollama_models_dir,
+            set_ollama_models_dir,
             // 保留的蓝本命令
             get_config_path,
             ensure_control_ui_allowed,

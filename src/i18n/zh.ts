@@ -47,6 +47,7 @@ export const zh = {
     security: '安全分析',
     install: '部署中心',
     store: '部署中心',
+    localModels: '本地模型',
   },
   connection: {
     title: '连接到 OpenClaw',

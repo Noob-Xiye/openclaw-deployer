@@ -47,6 +47,7 @@ export const en = {
     security: 'Security',
     install: 'Deploy Center',
     store: 'Deploy',
+    localModels: 'Local Models',
   },
   connection: {
     title: 'Connect to OpenClaw',

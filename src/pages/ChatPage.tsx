@@ -6,6 +6,8 @@ import {
   buildSessionKey,
   type ChatEvent,
   type ConnectionState,
+  type GatewayModel,
+  type gwRpc,
 } from '../services/gatewayWs';
 
 interface ChatMessage {
@@ -68,6 +70,7 @@ export function ChatPage() {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [gwState, setGwState] = useState<ConnectionState>('disconnected');
+  const [availableModels, setAvailableModels] = useState<GatewayModel[]>([]);
   // hasConnected: true once we've ever reached 'connected' in this session.
   // Used to suppress the scary "Gateway 未运行" banner during normal reconnects.
   const [hasConnected, setHasConnected] = useState(() => gatewayClient.state === 'connected');
@@ -123,6 +126,14 @@ export function ChatPage() {
     gatewayClient.ensureConnected().catch(() => {});
     return unsub;
   }, [port, token, configLoaded]);
+
+  // 加载可用模型列表
+  useEffect(() => {
+    if (gwState !== 'connected') return;
+    gatewayClient.request<{ models: GatewayModel[] }>('models.list', {})
+      .then(result => setAvailableModels(result?.models || []))
+      .catch(() => setAvailableModels([]));
+  }, [gwState]);
 
   // Auto-scroll
   useEffect(() => {
@@ -799,12 +810,50 @@ export function ChatPage() {
                 <div style={{ fontSize: 14, fontWeight: 700, color: agentColor }}>
                   {selectedAgent?.name || selectedAgentId}
                 </div>
-                <div style={{ fontSize: 11, color: 'var(--color-text-muted)', fontFamily: 'var(--font-family-mono)' }}>
+                <div style={{ fontSize: 11, color: 'var(--color-text-muted)', fontFamily: 'var(--font-family-mono)', display: 'flex', alignItems: 'center', gap: 6 }}>
                   {selectedAgentId}
                   {selectedAgent?.model && (
-                    <span style={{ marginLeft: 8, color: 'var(--color-text-muted)' }}>
-                      · {typeof selectedAgent.model === 'string' ? selectedAgent.model : selectedAgent.model.primary}
+                    <span>
+                      · {typeof selectedAgent.model === 'string' ? selectedAgent.model : (selectedAgent.model as { primary: string }).primary}
                     </span>
+                  )}
+                  {availableModels.length > 0 && (
+                    <select
+                      value={typeof selectedAgent?.model === 'string' ? selectedAgent.model : (selectedAgent?.model as { primary: string })?.primary || ''}
+                      onChange={async (e) => {
+                        const newModel = e.target.value;
+                        const currentModel = typeof selectedAgent?.model === 'string' ? selectedAgent.model : (selectedAgent?.model as { primary: string })?.primary;
+                        if (!newModel || newModel === currentModel) return;
+                        // 调用 API 切换模型
+                        try {
+                          await gatewayClient.request('agents.update', { 
+                            agentId: selectedAgentId, 
+                            model: newModel 
+                          });
+                          alert(`模型已切换到: ${newModel}\n页面将刷新以应用新模型...`);
+                          // 延迟刷新让用户看到提示
+                          setTimeout(() => window.location.reload(), 1500);
+                        } catch (err) {
+                          alert(`切换失败: ${err}`);
+                        }
+                      }}
+                      style={{
+                        marginLeft: 8,
+                        padding: '2px 6px',
+                        fontSize: 10,
+                        borderRadius: 4,
+                        border: '1px solid var(--color-border)',
+                        background: 'var(--color-surface)',
+                        color: 'var(--color-text-primary)',
+                      }}
+                    >
+                      <option value="">切换模型</option>
+                      {availableModels.map(m => (
+                        <option key={m.id} value={m.id}>
+                          {m.name || m.id} {m.provider ? `(${m.provider})` : ''}
+                        </option>
+                      ))}
+                    </select>
                   )}
                 </div>
               </div>
