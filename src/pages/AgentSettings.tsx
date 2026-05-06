@@ -255,6 +255,99 @@ export function AgentSettings() {
         </div>
       </SectionCard>
 
+      {/* Sub-agent Delegation Strategy */}
+      <SectionCard title={at.subagentStrategy} subtitle={at.subagentStrategySubtitle}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <FormField label={at.delegateMode} hint={at.autoDelegateHint} tooltip="auto 模式下，智能体根据任务复杂度自动判断是否委派；always 模式下所有多步骤任务都走子智能体；off 则完全关闭委派">
+            <select
+              className="select"
+              value={local.defaults?.subagents?.delegation?.mode || 'auto'}
+              onChange={e => updDefaults({
+                subagents: {
+                  ...local.defaults?.subagents,
+                  model: local.defaults?.subagents?.model,
+                  delegation: {
+                    ...local.defaults?.subagents?.delegation,
+                    mode: e.target.value as 'off' | 'auto' | 'always',
+                  },
+                },
+              })}
+            >
+              <option value="auto">{at.delegateModeOptions.auto}</option>
+              <option value="always">{at.delegateModeOptions.always}</option>
+              <option value="off">{at.delegateModeOptions.off}</option>
+            </select>
+          </FormField>
+
+          {(local.defaults?.subagents?.delegation?.mode ?? 'auto') !== 'off' && (
+            <>
+              <div className="form-row">
+                <FormField label={at.delegateThreshold} hint={at.delegateThresholdHint} tooltip="主会话连续工具调用次数达到此阈值时，后续步骤自动委派给子智能体执行。推荐值 15-30">
+                  <input
+                    className="input"
+                    type="number"
+                    min={5}
+                    max={200}
+                    value={local.defaults?.subagents?.delegation?.threshold ?? 20}
+                    onChange={e => updDefaults({
+                      subagents: {
+                        ...local.defaults?.subagents,
+                        model: local.defaults?.subagents?.model,
+                        delegation: {
+                          ...local.defaults?.subagents?.delegation,
+                          threshold: Number(e.target.value) || 20,
+                        },
+                      },
+                    })}
+                    style={{ width: 120 }}
+                  />
+                </FormField>
+                <FormField label={at.maxSubagentSteps} hint={at.maxSubagentStepsHint} tooltip="单个子智能体任务的最大工具调用步数。超出后子智能体会自动汇总结果返回。推荐值 30-80">
+                  <input
+                    className="input"
+                    type="number"
+                    min={10}
+                    max={500}
+                    value={local.defaults?.subagents?.delegation?.maxSteps ?? 50}
+                    onChange={e => updDefaults({
+                      subagents: {
+                        ...local.defaults?.subagents,
+                        model: local.defaults?.subagents?.model,
+                        delegation: {
+                          ...local.defaults?.subagents?.delegation,
+                          maxSteps: Number(e.target.value) || 50,
+                        },
+                      },
+                    })}
+                    style={{ width: 120 }}
+                  />
+                </FormField>
+              </div>
+
+              <div style={{
+                padding: '10px 14px', borderRadius: 8,
+                background: 'rgba(16,185,129,0.08)',
+                border: '1px solid rgba(16,185,129,0.2)',
+                fontSize: 12, color: '#34D399',
+              }}>
+                {at.delegateInfo}
+              </div>
+            </>
+          )}
+
+          {(local.defaults?.subagents?.delegation?.mode ?? 'auto') === 'off' && (
+            <div style={{
+              padding: '10px 14px', borderRadius: 8,
+              background: 'rgba(239,68,68,0.08)',
+              border: '1px solid rgba(239,68,68,0.2)',
+              fontSize: 12, color: '#F87171',
+            }}>
+              {at.delegateWarning}
+            </div>
+          )}
+        </div>
+      </SectionCard>
+
       {/* Agent list */}
       <SectionCard
         title={at.agentList}

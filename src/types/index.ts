@@ -67,7 +67,14 @@ export interface AgentDefaults {
     vectorSearch?: { enabled: boolean; provider?: string; model?: string };
     autoRefresh?: { enabled: boolean; threshold?: number };
   };
-  subagents?: { model?: string };
+  subagents?: {
+    model?: string;
+    delegation?: {
+      mode?: 'off' | 'auto' | 'always';
+      threshold?: number;  // tool call count threshold for auto-delegation
+      maxSteps?: number;   // max steps per sub-agent task
+    };
+  };
   session?: Partial<SessionConfig>;
   tools?: AgentToolsOverride;
 }
